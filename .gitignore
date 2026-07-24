@@ -1,3 +1,8 @@
 dist
 node_modules
 *.tsbuildinfo
+
+# OpenCode config
+opencode.json
+tui.json
+

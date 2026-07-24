@@ -1,0 +1,48 @@
+{
+  "name": "paperclip-plugin-aws-ssm-environment",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "AWS SSM environment driver for Paperclip — run agents on a persistent EC2/hybrid instance over AWS Systems Manager, no inbound SSH required.",
+  "scripts": {
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test && npm run build && node scripts/check-manifest-contract.mjs",
+    "prepublishOnly": "npm run verify"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "plugin",
+    "environment",
+    "aws",
+    "ssm",
+    "session-manager",
+    "ec2"
+  ],
+  "author": "Tyler Walters",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1075.0",
+    "@aws-sdk/client-ssm": "^3.1075.0",
+    "@aws-sdk/credential-provider-ini": "^3.972.0"
+  },
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "^2026.722.0",
+    "@paperclipai/shared": "^2026.722.0",
+    "@types/node": "^24.6.0",
+    "aws-sdk-client-mock": "^4.1.0",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

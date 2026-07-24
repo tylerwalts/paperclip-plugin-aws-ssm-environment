@@ -36,11 +36,38 @@ VPC). Paperclip never creates, stops, or terminates the instance.
 ### 2. Prepare the Paperclip host
 
 - AWS credentials for the daemon user (default chain or a named profile in
-  `~/.aws/credentials`) with `ssm:DescribeInstanceInformation`,
-  `ssm:SendCommand`, `ssm:GetCommandInvocation`, `ssm:StartSession`,
-  `ssm:TerminateSession`, and `s3:GetObject` on the output bucket.
+  `~/.aws/credentials`) with the permissions below.
 - The [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
   (`session-manager-plugin`) on `PATH`.
+
+Create an IAM policy for the Paperclip host credentials:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeInstanceInformation",
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:StartSession",
+        "ssm:TerminateSession"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::YOUR-OUTPUT-BUCKET/ssm-output/*"
+    }
+  ]
+}
+```
+
+Replace `YOUR-OUTPUT-BUCKET` with the bucket name configured in
+`outputS3Bucket`. If not using S3 output capture, omit the second statement.
 
 ### 3. Install the plugin
 

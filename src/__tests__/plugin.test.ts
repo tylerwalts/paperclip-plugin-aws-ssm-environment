@@ -136,6 +136,43 @@ describe("validateConfig", () => {
     expect(result.ok).toBe(true);
     expect(result.normalizedConfig).toMatchObject({ awsProfile: null });
   });
+
+  it("strips an s3:// scheme and trailing slashes from outputS3Bucket", async () => {
+    // SSM stores OutputS3BucketName unvalidated and the S3 SDK only rejects the
+    // URL form on the later read, so an unnormalized value yields commands that
+    // succeed with no output at all instead of a visible failure.
+    const harness = makeHarness();
+    for (const input of ["s3://my-output-bucket", "S3://my-output-bucket/", "my-output-bucket"]) {
+      const result = await harness.validateConfig({
+        driverKey,
+        config: { ...BASE_CONFIG, outputS3Bucket: input },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.normalizedConfig).toMatchObject({ outputS3Bucket: "my-output-bucket" });
+    }
+  });
+
+  it("rejects an outputS3Bucket that is a path or key prefix rather than a bucket name", async () => {
+    const harness = makeHarness();
+    for (const input of ["s3://my-output-bucket/some/prefix", "my-output-bucket/prefix", "MyBucket"]) {
+      const result = await harness.validateConfig({
+        driverKey,
+        config: { ...BASE_CONFIG, outputS3Bucket: input },
+      });
+      expect(result.ok).toBe(false);
+      expect(result.errors?.join(" ")).toMatch(/outputS3Bucket/);
+    }
+  });
+
+  it("still treats a blank outputS3Bucket as unset", async () => {
+    const harness = makeHarness();
+    const result = await harness.validateConfig({
+      driverKey,
+      config: { ...BASE_CONFIG, outputS3Bucket: "   " },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.normalizedConfig).toMatchObject({ outputS3Bucket: null });
+  });
 });
 
 describe("probe", () => {

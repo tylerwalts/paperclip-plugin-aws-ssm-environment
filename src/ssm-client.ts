@@ -388,6 +388,10 @@ async function runSsmCommandLargeOutput(
   let status = "";
   let responseCode: number | undefined;
   let timedOut = false;
+  // SSM returns the first 24KB of each stream inline even when S3 capture is
+  // configured. Keep it: it is the fallback when the S3 copy is unreadable.
+  let inlineStdout = "";
+  let inlineStderr = "";
 
   try {
     while (Date.now() < deadline) {
@@ -403,6 +407,8 @@ async function runSsmCommandLargeOutput(
       }
       status = invocation.Status ?? "";
       responseCode = invocation.ResponseCode;
+      inlineStdout = invocation.StandardOutputContent ?? "";
+      inlineStderr = invocation.StandardErrorContent ?? "";
       if (status === "InProgress" || status === "Pending" || status === "Delayed") continue;
       break;
     }
@@ -421,13 +427,22 @@ async function runSsmCommandLargeOutput(
     : status === "TimedOut" ? null
     : (typeof responseCode === "number" ? responseCode : 1);
 
-  // Read stdout/stderr from S3
+  // Read stdout/stderr from S3, falling back to what SSM returned inline.
   const s3Client = buildS3Client(input);
-  const stdoutKey = `${s3Prefix}/${commandId}/${input.instanceId}/awsrunShellScript/0.awsrunShellScript/stdout`;
-  const stderrKey = `${s3Prefix}/${commandId}/${input.instanceId}/awsrunShellScript/0.awsrunShellScript/stderr`;
-  const stdout = await readS3Object(s3Client, bucket, stdoutKey);
-  const stderr = await readS3Object(s3Client, bucket, stderrKey);
-  s3Client.destroy();
+  const keyFor = (stream: string) =>
+    `${s3Prefix}/${commandId}/${input.instanceId}/awsrunShellScript/0.awsrunShellScript/${stream}`;
+  let stdout: string;
+  let stderr: string;
+  try {
+    stdout = await readCommandStream({
+      client: s3Client, bucket, key: keyFor("stdout"), inline: inlineStdout, stream: "stdout",
+    });
+    stderr = await readCommandStream({
+      client: s3Client, bucket, key: keyFor("stderr"), inline: inlineStderr, stream: "stderr",
+    });
+  } finally {
+    s3Client.destroy();
+  }
 
   if (status === "TimedOut") {
     return { stdout, stderr, exitCode: null, timedOut: true };
@@ -443,15 +458,60 @@ function buildS3Client(input: { region: string; awsProfile: string | null }): S3
   return new S3Client({ region: input.region });
 }
 
-async function readS3Object(client: S3Client, bucket: string, key: string): Promise<string> {
+/** Ceiling on what GetCommandInvocation returns per stream. */
+const SSM_INLINE_OUTPUT_LIMIT = 24_000;
+
+const S3_MISSING_OBJECT_ERROR_NAMES = new Set(["NoSuchKey", "NotFound"]);
+
+/**
+ * Read one command stream, preferring the uncapped S3 copy.
+ *
+ * A stream that produced no bytes gets no S3 object at all — SSM writes each
+ * key only when that stream had output — so a missing object is the ordinary
+ * "empty" case. Note the reader also sees a plain 403 there when it lacks
+ * s3:ListBucket on the bucket, because S3 hides existence from principals that
+ * cannot list; missing and forbidden are genuinely indistinguishable then.
+ *
+ * So an unreadable S3 copy must not be reported as "the command printed
+ * nothing": that is what turned a bucket name with an `s3://` prefix into a
+ * command that looked like a clean success with no output, and killed the
+ * caller far away with `JSON.parse("")`. Fall back to the inline copy SSM
+ * returns regardless of S3 capture, which covers every output under 24KB —
+ * including all of the small control-plane commands. Only when the inline copy
+ * is itself at the cap is there no correct answer available, and that is worth
+ * failing over rather than silently truncating.
+ */
+async function readCommandStream(input: {
+  client: S3Client;
+  bucket: string;
+  key: string;
+  inline: string;
+  stream: "stdout" | "stderr";
+}): Promise<string> {
   try {
-    const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const content = await response.Body?.transformToString("utf8") ?? "";
-    return content;
+    const response = await input.client.send(
+      new GetObjectCommand({ Bucket: input.bucket, Key: input.key }),
+    );
+    return await response.Body?.transformToString("utf8") ?? "";
   } catch (error) {
+    const name = (error as { name?: string }).name ?? "";
+    const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    if (S3_MISSING_OBJECT_ERROR_NAMES.has(name) || status === 404) return "";
+
     const msg = error instanceof Error ? error.message : String(error);
-    console.error(`[ssm-largeOutput] S3 read FAILED: bucket=${bucket} key=${key} error=${msg}`);
-    return "";
+    if (input.inline.length >= SSM_INLINE_OUTPUT_LIMIT) {
+      throw new SsmDriverError(
+        `SSM command ${input.stream} exceeds the 24KB inline limit and its S3 copy could not be read `
+          + `(bucket=${input.bucket} key=${input.key}): ${msg}. Check the environment's outputS3Bucket `
+          + "setting — it must be a bucket name, not an s3:// URL — and that both the instance role and "
+          + "the Paperclip host can access that bucket.",
+      );
+    }
+    console.error(
+      `[ssm-largeOutput] S3 ${input.stream} unreadable, using SSM's inline copy instead: `
+        + `bucket=${input.bucket} key=${input.key} error=${msg}`,
+    );
+    return input.inline;
   }
 }
 

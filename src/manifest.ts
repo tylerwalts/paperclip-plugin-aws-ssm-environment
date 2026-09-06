@@ -60,7 +60,7 @@ const manifest: PaperclipPluginManifestV1 = {
             type: "string",
             title: "S3 bucket for large command output",
             description:
-              "Captures full stdout/stderr via S3 for long-running commands, avoiding the 24KB SSM output limit. The instance role and the Paperclip host both need access.",
+              "Bucket name only (my-output-bucket) — not an s3:// URL and not a path. Captures full stdout/stderr via S3 for long-running commands, avoiding the 24KB SSM output limit. The instance role and the Paperclip host both need access.",
             "x-paperclip-advanced": true,
           },
           largeOutputTimeoutThresholdMs: {

@@ -6,9 +6,11 @@ import {
   SendCommandCommand,
   GetCommandInvocationCommand,
 } from "@aws-sdk/client-ssm";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SsmDriverError, resolveSsmInstanceByTag, runSsmCommand } from "../ssm-client.js";
 
 const ssmMock = mockClient(SSMClient);
+const s3Mock = mockClient(S3Client);
 
 describe("ssm-client helpers", () => {
   beforeEach(() => {
@@ -189,5 +191,90 @@ describe("ssm-client helpers", () => {
       expect(result.exitCode).toBeNull();
       expect(result.timedOut).toBe(true);
     });
+  });
+
+  describe("runSsmCommand with S3 large-output capture", () => {
+    const largeOutputInput = {
+      region: "us-east-1",
+      awsProfile: null,
+      instanceId: "i-abc123",
+      command: "claude -p 'do things'",
+      largeOutput: true,
+      outputS3Bucket: "my-output-bucket",
+      // Above the poll interval so the single poll pass suffices; the command
+      // itself is mocked, so nothing actually waits this long.
+      timeoutMs: 20_000,
+    } as const;
+
+    const mockInvocation = (inlineStdout: string, inlineStderr = "") => {
+      ssmMock.on(SendCommandCommand).resolves({ Command: { CommandId: "cmd-large" } });
+      ssmMock.on(GetCommandInvocationCommand).resolves({
+        Status: "Success",
+        StandardOutputContent: inlineStdout,
+        StandardErrorContent: inlineStderr,
+        ResponseCode: 0,
+      });
+    };
+
+    beforeEach(() => {
+      s3Mock.reset();
+      mockInvocation("");
+    });
+
+    it("prefers the S3 copy over SSM's capped inline copy", async () => {
+      mockInvocation("truncated");
+      s3Mock.on(GetObjectCommand).callsFake((input: { Key?: string }) => ({
+        Body: { transformToString: async () => (input.Key?.endsWith("/stdout") ? "full output\n" : "") },
+      }));
+
+      const result = await runSsmCommand({ ...largeOutputInput });
+
+      expect(result.stdout).toBe("full output\n");
+    }, 30_000);
+
+    it("treats a missing S3 object as empty output, not a failure", async () => {
+      // SSM writes the stderr object only when the command wrote to stderr, so
+      // NoSuchKey is the ordinary "nothing on this stream" case.
+      const missing = new Error("The specified key does not exist.");
+      missing.name = "NoSuchKey";
+      s3Mock.on(GetObjectCommand).callsFake((input: { Key?: string }) => {
+        if (input.Key?.endsWith("/stdout")) {
+          return { Body: { transformToString: async () => "hello\n" } };
+        }
+        throw missing;
+      });
+
+      const result = await runSsmCommand({ ...largeOutputInput });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("hello\n");
+      expect(result.stderr).toBe("");
+    }, 30_000);
+
+    it("falls back to SSM's inline copy when the S3 copy is unreadable", async () => {
+      // The bug this guards: an `s3://`-prefixed bucket name made every read
+      // fail, the plugin reported an empty stdout with exit 0, and the caller
+      // died parsing "" as JSON — nowhere near the real cause. SSM returns the
+      // first 24KB inline regardless of S3 capture, so that answer was always
+      // available.
+      mockInvocation('{"uploaded":true}\n');
+      s3Mock.on(GetObjectCommand).rejects(
+        new Error("Bucket name shouldn't contain '/', received 's3://my-output-bucket'"),
+      );
+
+      const result = await runSsmCommand({ ...largeOutputInput });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('{"uploaded":true}\n');
+    }, 30_000);
+
+    it("refuses to silently truncate when inline is capped and S3 is unreadable", async () => {
+      mockInvocation("x".repeat(24_000));
+      s3Mock.on(GetObjectCommand).rejects(new Error("Access Denied"));
+
+      await expect(runSsmCommand({ ...largeOutputInput })).rejects.toMatchObject({
+        message: expect.stringContaining("exceeds the 24KB inline limit"),
+      });
+    }, 30_000);
   });
 });
